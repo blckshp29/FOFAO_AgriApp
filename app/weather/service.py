@@ -16,6 +16,9 @@ class WeatherService:
     def get_weather_forecast(self, db: Session, request: WeatherForecastRequest) -> Dict[str, Any]:
         """Fetch weather forecast from OpenWeatherMap API with Automatic DB Saving"""
         try:
+            if not self.api_key:
+                raise Exception("OPENWEATHER_API_KEY is not configured")
+
             url = f"{self.base_url}/forecast"
             params = {
                 "lat": request.latitude,
@@ -23,8 +26,10 @@ class WeatherService:
                 "units": "metric",
                 "appid": self.api_key
             }
-            
+            print("Calling external API...")
             response = requests.get(url, params=params, timeout=10)
+            print(f"External API status: {response.status_code}")
+            print(f"External API body: {response.text}")
             response.raise_for_status()
             data = response.json()
             
@@ -37,6 +42,15 @@ class WeatherService:
             
             return forecast
             
+        except requests.HTTPError as http_err:
+            status = http_err.response.status_code if http_err.response else "unknown"
+            body = http_err.response.text if http_err.response else ""
+            msg = f"OpenWeather request failed ({status}): {body}"
+            print(msg)
+            cached_data = self.get_last_saved_weather(db, request.latitude, request.longitude)
+            if cached_data:
+                return cached_data
+            raise Exception(msg)
         except Exception as e:
             # --- NEW: ROBUST ERROR HANDLING ---
             # If the internet is down, immediately try to get cached data

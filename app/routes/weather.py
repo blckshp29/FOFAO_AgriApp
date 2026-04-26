@@ -1,17 +1,60 @@
+from datetime import datetime, timedelta
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-import httpx
 
 from ..database import get_db
-from ..models import User
+from ..models import Field, User
+from ..schemas import WeatherCurrentResponse, WeatherForecastRequest, WeatherForecastResponse
+from ..weather.openweather_async import AsyncOpenWeatherService
 from ..weather.service import WeatherService
-from ..schemas import WeatherForecastRequest, WeatherForecastResponse
 from .auth import get_current_user
 from config import config
 
 router = APIRouter()
 weather_service = WeatherService()
+async_weather_service = AsyncOpenWeatherService()
+
+
+@router.get("/weather/current", response_model=WeatherCurrentResponse)
+async def get_current_weather(lat: float, lon: float):
+    """Current weather based on live user location."""
+    try:
+        return await async_weather_service.get_current_weather(lat, lon)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail="OpenWeatherMap request failed")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@router.get("/weather/field/{field_id}", response_model=WeatherCurrentResponse)
+async def get_field_weather(
+    field_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Current weather based on a saved field's coordinates."""
+    field = (
+        db.query(Field)
+        .filter(
+            Field.id == field_id,
+            Field.owner_id == current_user.id,
+            Field.is_deleted.is_(False),
+        )
+        .first()
+    )
+    if not field:
+        raise HTTPException(status_code=404, detail="Field not found")
+    if field.location_lat is None or field.location_lon is None:
+        raise HTTPException(status_code=400, detail="Field does not have coordinates")
+
+    try:
+        return await async_weather_service.get_current_weather(field.location_lat, field.location_lon)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail="OpenWeatherMap request failed")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 @router.post("/weather/forecast", response_model=WeatherForecastResponse)
 async def get_weather_forecast(
@@ -21,11 +64,12 @@ async def get_weather_forecast(
 ):
     """Fetches real data from Open-Meteo and automatically saves it to DB"""
     try:
+        print("Weather endpoint hit")
         # The service now handles fetching AND saving internally
         forecast = weather_service.get_weather_forecast(db, request)
         return forecast
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e))
 
 @router.get("/weather/suitability")
 async def get_farm_weather(lat: float, lon: float):

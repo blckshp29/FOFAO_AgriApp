@@ -1,6 +1,6 @@
 import json
 from pydantic import AliasChoices, BaseModel, Field as PyField, ConfigDict # Rename Field here
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime, date
 from pydantic import field_validator
 from enum import Enum
@@ -47,6 +47,10 @@ class TaskStatusEnum(str, Enum):
     cancelled = "cancelled"
     rescheduled = "rescheduled"
 
+class OperationStatusEnum(str, Enum):
+    ongoing = "ongoing"
+    completed = "completed"
+
 class OtpChannelEnum(str, Enum):
     email = "email"
     sms = "sms"
@@ -64,7 +68,7 @@ class SyncMeta(BaseModel):
 # --- User Schemas ---
 class UserBase(BaseModel):
     username: str
-    email: str
+    email: Optional[str] = None
     full_name: Optional[str] = None
     farm_name: Optional[str] = None
     client_id: Optional[str] = None
@@ -104,6 +108,10 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
     otp_code: Optional[str] = None
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
@@ -280,9 +288,10 @@ class Farm(FarmBase):
 # --- Field Schemas ---
 class FieldBase(BaseModel):
     name: str
-    area_hectares: float
+    area_hectares: Optional[float] = None
     crop_type: CropTypeEnum
     crop_variety: Optional[str] = None
+    gross_revenue: Optional[float] = None
     client_id: Optional[str] = None
     planting_date: Optional[datetime] = None
     land_prep_start_date: Optional[datetime] = None
@@ -343,8 +352,62 @@ class FieldBase(BaseModel):
         default=None,
         validation_alias=AliasChoices("market_price_per_unit", "marketPricePerUnit")
     )
+    operation_status: Optional[OperationStatusEnum] = PyField(
+        default=OperationStatusEnum.ongoing,
+        validation_alias=AliasChoices("operation_status", "operationStatus")
+    )
+    status: Optional[str] = "ongoing"
+    completed_at: Optional[datetime] = PyField(
+        default=None,
+        validation_alias=AliasChoices("completed_at", "completedAt")
+    )
     location_lat: Optional[float] = None
     location_lon: Optional[float] = None
+
+    @field_validator("gross_revenue")
+    @classmethod
+    def validate_gross_revenue(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("gross_revenue must be greater than or equal to 0")
+        return value
+
+    @field_validator("area_hectares")
+    @classmethod
+    def validate_area_hectares(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("area_hectares must be greater than or equal to 0")
+        return value
+
+    @field_validator("location_lat", "location_lon", mode="before")
+    @classmethod
+    def empty_string_to_none(cls, value):
+        if value == "":
+            return None
+        return value
+
+    @field_validator("area_hectares", "gross_revenue", mode="before")
+    @classmethod
+    def numeric_empty_string_to_none(cls, value):
+        if value == "":
+            return None
+        return value
+
+    @field_validator("crop_type", mode="after")
+    @classmethod
+    def validate_crop_specific_requirements(cls, value, info):
+        data = info.data
+        area_hectares = data.get("area_hectares")
+        gross_revenue = data.get("gross_revenue")
+
+        if value == CropTypeEnum.coconut:
+            if gross_revenue is not None and gross_revenue < 0:
+                raise ValueError("gross_revenue must be greater than or equal to 0")
+            return value
+
+        if area_hectares is None or area_hectares <= 0:
+            raise ValueError("area_hectares must be greater than 0 for non-coconut crops")
+
+        return value
 
 class FieldCreate(FieldBase):
     farm_id: int
@@ -355,6 +418,7 @@ class FieldUpdate(BaseModel):
     area_hectares: Optional[float] = None
     crop_type: Optional[CropTypeEnum] = None
     crop_variety: Optional[str] = None
+    gross_revenue: Optional[float] = None
     client_id: Optional[str] = None
     planting_date: Optional[datetime] = None
     land_prep_start_date: Optional[datetime] = None
@@ -382,8 +446,45 @@ class FieldUpdate(BaseModel):
     expected_yield_per_ha: Optional[float] = PyField(default=None, validation_alias=AliasChoices("expected_yield_per_ha", "expectedYieldPerHa"))
     actual_yield: Optional[float] = PyField(default=None, validation_alias=AliasChoices("actual_yield", "actualYield"))
     market_price_per_unit: Optional[float] = PyField(default=None, validation_alias=AliasChoices("market_price_per_unit", "marketPricePerUnit"))
+    operation_status: Optional[OperationStatusEnum] = PyField(
+        default=None,
+        validation_alias=AliasChoices("operation_status", "operationStatus")
+    )
+    status: Optional[str] = None
+    completed_at: Optional[datetime] = PyField(
+        default=None,
+        validation_alias=AliasChoices("completed_at", "completedAt")
+    )
     location_lat: Optional[float] = None
     location_lon: Optional[float] = None
+
+    @field_validator("location_lat", "location_lon", mode="before")
+    @classmethod
+    def empty_location_string_to_none(cls, value):
+        if value == "":
+            return None
+        return value
+
+    @field_validator("area_hectares", "gross_revenue", mode="before")
+    @classmethod
+    def empty_numeric_string_to_none(cls, value):
+        if value == "":
+            return None
+        return value
+
+    @field_validator("gross_revenue")
+    @classmethod
+    def validate_updated_gross_revenue(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("gross_revenue must be greater than or equal to 0")
+        return value
+
+    @field_validator("area_hectares")
+    @classmethod
+    def validate_updated_area_hectares(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("area_hectares must be greater than or equal to 0")
+        return value
 
 class Field(FieldBase):
     id: int
@@ -396,6 +497,77 @@ class Field(FieldBase):
     sync_status: Optional[SyncStatusEnum] = SyncStatusEnum.pending
     
     model_config = ConfigDict(from_attributes=True)
+
+
+class CompletedOperationHistory(BaseModel):
+    id: int
+    owner_id: int
+    field_id: int
+    farm_id: Optional[int] = None
+    project_id: Optional[int] = None
+    crop_type: CropTypeEnum
+    crop_variety: Optional[str] = None
+    season_label: Optional[str] = None
+    season_year: Optional[int] = None
+    start_date: Optional[datetime] = None
+    completed_at: datetime
+    planned_budget: float = 0
+    actual_cost: float = 0
+    actual_yield: float = 0
+    actual_revenue: float = 0
+    location: Optional[str] = None
+    task_history: List[Dict[str, Any]] = PyField(default_factory=list)
+    category_costs: Dict[str, float] = PyField(default_factory=dict)
+    financial_snapshot: Dict[str, Any] = PyField(default_factory=dict)
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("task_history", mode="before")
+    @classmethod
+    def parse_task_history(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return []
+        return []
+
+    @field_validator("category_costs", mode="before")
+    @classmethod
+    def parse_category_costs(cls, value):
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    @field_validator("financial_snapshot", mode="before")
+    @classmethod
+    def parse_financial_snapshot(cls, value):
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
 
 # --- Inventory Schemas ---
 class InventoryBase(BaseModel):
@@ -459,10 +631,43 @@ class CropProject(CropProjectBase):
     income_total: float = 0
     expense_total: float = 0
     status: ProjectStatusEnum = ProjectStatusEnum.planned
+    completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     last_synced_at: Optional[datetime] = None
     sync_status: Optional[SyncStatusEnum] = SyncStatusEnum.pending
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectCompletionResponse(BaseModel):
+    id: int
+    field_id: Optional[int] = None
+    crop_type: CropTypeEnum
+    crop_variety: Optional[str] = None
+    status: ProjectStatusEnum
+    completed_at: Optional[datetime] = None
+    message: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CompletedProjectListItem(BaseModel):
+    id: int
+    name: str
+    field_id: Optional[int] = None
+    field_name: Optional[str] = None
+    crop_type: CropTypeEnum
+    crop_variety: Optional[str] = None
+    area_hectares: Optional[float] = None
+    started_at: Optional[datetime] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    status: ProjectStatusEnum
+    gross_revenue: Optional[float] = None
+    total_budget: float = 0
+    total_expenses: float = 0
+    total_income: float = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -545,6 +750,10 @@ class ScheduledTaskBase(BaseModel):
     cycle_day: Optional[int] = PyField(default=None, ge=0)
     completed_at: Optional[datetime] = None
     confirmed_by_user: Optional[bool] = False
+    early_completed: Optional[bool] = False
+    early_completion_reason: Optional[str] = None
+    early_completion_warning_acknowledged: Optional[bool] = False
+    early_completion_days: Optional[int] = 0
     field_id: int
     project_id: Optional[int] = None
 
@@ -590,6 +799,14 @@ class ScheduledTaskUpdate(BaseModel):
     cycle_day: Optional[int] = PyField(default=None, ge=0)
     completed_at: Optional[datetime] = None
     confirmed_by_user: Optional[bool] = None
+    early_completed: Optional[bool] = None
+    early_completion_reason: Optional[str] = None
+    early_completion_warning_acknowledged: Optional[bool] = None
+    early_completion_days: Optional[int] = None
+    confirm_early_completion: Optional[bool] = PyField(
+        default=None,
+        validation_alias=AliasChoices("confirm_early_completion", "confirmEarlyCompletion")
+    )
     field_id: Optional[int] = None
     project_id: Optional[int] = None
 
@@ -606,6 +823,12 @@ class WeatherForecastRequest(BaseModel):
     latitude: float = PyField(..., ge=-90, le=90)
     longitude: float = PyField(..., ge=-180, le=180)
     days: int = PyField(default=5, ge=1, le=5) # OpenWeatherMap 5-day forecast limit
+
+class WeatherCurrentResponse(BaseModel):
+    temperature: Optional[float] = None
+    condition: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
 
 class WeatherForecastResponse(BaseModel):
     latitude: float
@@ -722,13 +945,53 @@ class CornBudgetTemplateResponse(BaseModel):
     expected_returns: CornYieldIncomeEstimate
 
 class CoconutBudgetTemplateResponse(BaseModel):
-    crop_type: str
-    hectares: float
-    currency: str
-    budget_min: float
-    budget_max: float
-    budget_recommended: float
-    allocations: List[BudgetAllocationItem]
+    net_revenue: float
+    owner_share: float
+    tenant_share: Optional[float] = None
+    labor_total: float
+    labor_individual: float
+    number_of_labors: int
+
+
+class CoconutAllocationSaveRequest(BaseModel):
+    gross_revenue: Optional[float] = None
+    arrastre_cost: float = 0
+    food_cost: float = 0
+    number_of_labors: int
+    contract_type: Literal["50_50", "60_40", "tercia"]
+
+    @field_validator("gross_revenue", "arrastre_cost", "food_cost")
+    @classmethod
+    def validate_non_negative_amounts(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("amounts must be greater than or equal to 0")
+        return value
+
+    @field_validator("number_of_labors")
+    @classmethod
+    def validate_number_of_labors(cls, value):
+        if value <= 0:
+            raise ValueError("number_of_labors must be greater than 0")
+        return value
+
+
+class CoconutAllocationResponse(BaseModel):
+    id: int
+    project_id: int
+    gross_revenue: float
+    arrastre_cost: float
+    food_cost: float
+    number_of_labors: int
+    contract_type: Literal["50_50", "60_40", "tercia"]
+    net_revenue: float
+    owner_share: float
+    tenant_share: Optional[float] = None
+    labor_total: float
+    labor_individual: float
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 class VegetableBudgetTemplateResponse(BaseModel):
     crop_type: str

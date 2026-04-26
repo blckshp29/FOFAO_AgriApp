@@ -40,6 +40,8 @@ def init_db():
         WeatherCache,
         DecisionTreeModel,
         CropProject,
+        CompletedOperationHistory,
+        CoconutAllocation,
         OtpCode,
         UserPreference,
         Notification,
@@ -51,10 +53,14 @@ def init_db():
     print("Creating database tables...")
     Base.metadata.create_all(bind=engine)
     _ensure_field_corn_columns()
+    _ensure_field_gross_revenue_column()
+    _ensure_field_operation_columns()
     _ensure_scheduled_task_cycle_columns()
+    _ensure_scheduled_task_early_completion_columns()
     _ensure_scheduled_task_notification_columns()
     _ensure_weather_data_columns()
     _ensure_notification_data_column()
+    _ensure_crop_project_completion_columns()
     print("Done!")
 
     # Verification check
@@ -136,6 +142,49 @@ def _ensure_field_corn_columns():
             conn.execute(text(stmt))
 
 
+def _ensure_field_gross_revenue_column():
+    """Backfill gross_revenue on fields for coconut salary allocation."""
+    import sqlalchemy
+
+    inspector = sqlalchemy.inspect(engine)
+    if "fields" not in inspector.get_table_names():
+        return
+
+    existing_cols = {c["name"] for c in inspector.get_columns("fields")}
+    if "gross_revenue" in existing_cols:
+        return
+
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE fields ADD COLUMN gross_revenue FLOAT"))
+
+
+def _ensure_field_operation_columns():
+    """Backfill field completion tracking columns for existing databases."""
+    import sqlalchemy
+
+    inspector = sqlalchemy.inspect(engine)
+    if "fields" not in inspector.get_table_names():
+        return
+
+    existing_cols = {c["name"] for c in inspector.get_columns("fields")}
+    alter_sql = []
+    if "operation_status" not in existing_cols:
+        alter_sql.append("ALTER TABLE fields ADD COLUMN operation_status VARCHAR")
+    if "status" not in existing_cols:
+        alter_sql.append("ALTER TABLE fields ADD COLUMN status VARCHAR")
+    if "completed_at" not in existing_cols:
+        alter_sql.append("ALTER TABLE fields ADD COLUMN completed_at DATETIME")
+
+    with engine.begin() as conn:
+        for stmt in alter_sql:
+            conn.execute(text(stmt))
+
+        if "operation_status" not in existing_cols:
+            conn.execute(text("UPDATE fields SET operation_status = 'ongoing' WHERE operation_status IS NULL"))
+        if "status" not in existing_cols:
+            conn.execute(text("UPDATE fields SET status = 'ongoing' WHERE status IS NULL"))
+
+
 def _ensure_weather_data_columns():
     """Backfill weather_data columns used by offline forecast reconstruction."""
     import sqlalchemy
@@ -184,6 +233,42 @@ def _ensure_scheduled_task_notification_columns():
             conn.execute(text(stmt))
 
 
+def _ensure_scheduled_task_early_completion_columns():
+    """Backfill scheduled_tasks early completion fields for existing databases."""
+    import sqlalchemy
+
+    inspector = sqlalchemy.inspect(engine)
+    if "scheduled_tasks" not in inspector.get_table_names():
+        return
+
+    existing_cols = {c["name"] for c in inspector.get_columns("scheduled_tasks")}
+    alter_sql = []
+    if "early_completed" not in existing_cols:
+        alter_sql.append("ALTER TABLE scheduled_tasks ADD COLUMN early_completed BOOLEAN")
+    if "early_completion_reason" not in existing_cols:
+        alter_sql.append("ALTER TABLE scheduled_tasks ADD COLUMN early_completion_reason TEXT")
+    if "early_completion_warning_acknowledged" not in existing_cols:
+        alter_sql.append("ALTER TABLE scheduled_tasks ADD COLUMN early_completion_warning_acknowledged BOOLEAN")
+    if "early_completion_days" not in existing_cols:
+        alter_sql.append("ALTER TABLE scheduled_tasks ADD COLUMN early_completion_days INTEGER")
+
+    with engine.begin() as conn:
+        for stmt in alter_sql:
+            conn.execute(text(stmt))
+
+        if "early_completed" not in existing_cols:
+            conn.execute(text("UPDATE scheduled_tasks SET early_completed = 0 WHERE early_completed IS NULL"))
+        if "early_completion_warning_acknowledged" not in existing_cols:
+            conn.execute(
+                text(
+                    "UPDATE scheduled_tasks SET early_completion_warning_acknowledged = 0 "
+                    "WHERE early_completion_warning_acknowledged IS NULL"
+                )
+            )
+        if "early_completion_days" not in existing_cols:
+            conn.execute(text("UPDATE scheduled_tasks SET early_completion_days = 0 WHERE early_completion_days IS NULL"))
+
+
 def _ensure_notification_data_column():
     """Backfill notifications.data for structured frontend actions."""
     import sqlalchemy
@@ -198,3 +283,31 @@ def _ensure_notification_data_column():
 
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE notifications ADD COLUMN data TEXT"))
+
+
+def _ensure_crop_project_completion_columns():
+    """Backfill project completion tracking for existing databases."""
+    import sqlalchemy
+
+    inspector = sqlalchemy.inspect(engine)
+    if "crop_projects" not in inspector.get_table_names():
+        return
+
+    existing_cols = {c["name"] for c in inspector.get_columns("crop_projects")}
+    alter_sql = []
+    if "completed_at" not in existing_cols:
+        alter_sql.append("ALTER TABLE crop_projects ADD COLUMN completed_at DATETIME")
+
+    with engine.begin() as conn:
+        for stmt in alter_sql:
+            conn.execute(text(stmt))
+
+        conn.execute(
+            text(
+                """
+                UPDATE crop_projects
+                SET status = 'planned'
+                WHERE status IS NULL
+                """
+            )
+        )

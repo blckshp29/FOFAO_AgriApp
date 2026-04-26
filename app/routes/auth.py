@@ -10,7 +10,7 @@ from typing import Optional
 
 from ..database import get_db
 from ..models import User, OtpCode
-from ..schemas import UserCreate, User as UserSchema, Token, UserLogin, OtpRequest, OtpVerify, OtpResponse
+from ..schemas import RegisterRequest, User as UserSchema, Token, UserLogin, OtpRequest, OtpVerify, OtpResponse
 
 router = APIRouter()
 
@@ -76,48 +76,36 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         raise credentials_exception
     return user
 
-@router.post("/register", response_model=UserSchema)
-def register(user: UserCreate, db: Session = Depends(get_db)):
+@router.post("/register")
+def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     print("DEBUG: Register endpoint hit!") # <--- Add this
     # Check if user exists
-    db_user = db.query(User).filter(User.username == user.username).first()
+    db_user = db.query(User).filter(User.username == payload.username).first()
     print(f"DEBUG: Found user: {db_user}") # <--- Add this
     if db_user:
         raise HTTPException(status_code=400, detail="Username already registered")
     
-    # Check if email exists
-    db_email = db.query(User).filter(User.email == user.email).first()
-    if db_email:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # Check if mobile number exists
-    if user.mobile_number:
-        db_mobile = db.query(User).filter(User.mobile_number == user.mobile_number).first()
-        if db_mobile:
-            raise HTTPException(status_code=400, detail="Mobile number already registered")
+    # Basic validation
+    if not payload.username.strip():
+        raise HTTPException(status_code=400, detail="Username cannot be empty")
+    if len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     
     # Create new user
-    hashed_password = get_password_hash(user.password)
+    hashed_password = get_password_hash(payload.password)
+    # Ensure legacy NOT NULL email columns stay satisfied even without a real email
+    normalized_email = f"{payload.username}@placeholder.local"
     db_user = User(
-        username=user.username,
-        email=user.email,
-        hashed_password=hashed_password,
-        full_name=user.full_name,
-        farm_name=user.farm_name,
-        sex=user.sex,
-        location=user.location,
-        province=user.province,
-        city_municipality=user.city_municipality,
-        barangay=user.barangay,
-        mobile_number=user.mobile_number,
-        birthdate=user.birthdate
+        username=payload.username,
+        email=normalized_email,
+        hashed_password=hashed_password
     )
     
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
     
-    return db_user
+    return {"message": "Account created successfully"}
 
 @router.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):

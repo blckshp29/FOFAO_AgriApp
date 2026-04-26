@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from .. import models, schemas
 from ..database import get_db
 from ..models import ScheduledTask, Field, User, FinancialRecord
+from ..operations.history import sync_field_completion_from_tasks
 from ..schemas import ScheduledTaskCreate, ScheduledTask as ScheduledTaskSchema, RiceScheduleRequest, CornScheduleRequest
 from ..scheduling.service import SchedulingService
 from ..decision_tree.engine import DecisionTreeEngine
@@ -460,9 +461,52 @@ def update_task(
     # 2. Convert the input to a dictionary and REMOVE any fields the user didn't send
     # This prevents overwriting existing data with None
     update_data = task_update.model_dump(exclude_unset=True)
+    confirm_early_completion = bool(update_data.pop("confirm_early_completion", False))
+
+    new_status = update_data.get("status")
+    if new_status == schemas.TaskStatusEnum.completed and "completed_at" not in update_data:
+        update_data["completed_at"] = datetime.utcnow()
+    elif new_status and new_status != schemas.TaskStatusEnum.completed:
+        update_data.setdefault("completed_at", None)
+        update_data.setdefault("early_completed", False)
+        update_data.setdefault("early_completion_days", 0)
+        update_data.setdefault("early_completion_warning_acknowledged", False)
+
+    if new_status == schemas.TaskStatusEnum.completed:
+        completed_at = update_data.get("completed_at") or db_task.completed_at or datetime.utcnow()
+        scheduled_date = db_task.scheduled_date
+        is_early = completed_at < scheduled_date if scheduled_date and completed_at else False
+
+        if is_early:
+            request_marks_early = bool(update_data.get("early_completed"))
+            if not (request_marks_early or confirm_early_completion):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Task is being completed before the scheduled date. Confirmation is required."
+                )
+
+            early_days = max((scheduled_date.date() - completed_at.date()).days, 0)
+            update_data["early_completed"] = True
+            update_data["early_completion_warning_acknowledged"] = True
+            update_data["early_completion_days"] = early_days
+        else:
+            update_data["early_completed"] = False
+            update_data["early_completion_days"] = 0
+            update_data["early_completion_warning_acknowledged"] = False
+            if "early_completion_reason" not in update_data:
+                update_data["early_completion_reason"] = None
 
     # 3. Execute the update
     task_query.update(update_data, synchronize_session=False)
     db.commit()
+    updated_task = task_query.first()
+
+    if updated_task and updated_task.field_id and updated_task.status == "completed":
+        field = db.query(Field).filter(
+            Field.id == updated_task.field_id,
+            Field.owner_id == current_user.id
+        ).first()
+        if field and sync_field_completion_from_tasks(db, field):
+            db.commit()
 
     return task_query.first()

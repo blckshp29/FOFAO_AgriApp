@@ -1,21 +1,27 @@
 import app.models
 import asyncio
 import logging
-from fastapi import FastAPI, Depends, HTTPException, status
+from datetime import datetime, timedelta  # Added datetime here
+from contextlib import asynccontextmanager  # Added for lifespan
+from typing import List
+
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta  # Added datetime here
-from typing import List
-from contextlib import asynccontextmanager # Added for lifespan
-from . import models  # 1. This "registers" the models with Base
 
-from .database import get_db, init_db, Base, engine, SessionLocal
+from . import models  # 1. This "registers" the models with Base
+from .database import Base, SessionLocal, engine, get_db, init_db
 from .firebase import initialize_firebase
 from .models import User
-from .schemas import UserCreate, User as UserSchema, Token, UserLogin
-from .routes import auth, farm, financial, scheduling, weather, sync, location, profile, notifications
+from .routes import auth, farm, financial, location, notifications, profile, scheduling, sync, weather
 from .scheduling.service import SchedulingService
+from .schemas import Token, User as UserSchema, UserLogin
+from .weather.alert_scheduler import weather_alert_loop
+
+# Load environment variables early so config picks them up
+load_dotenv()
 
 
 logger = logging.getLogger(__name__)
@@ -49,18 +55,20 @@ app = FastAPI(title="FOFAO Backend API")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # This runs when the app starts
-    background_task = None
+    background_tasks = []
     try:
         initialize_firebase()
     except Exception as exc:
         logger.warning("Firebase initialization skipped: %s", exc)
     print("Initializing database tables...")
     init_db()
-    background_task = asyncio.create_task(tomorrow_notification_loop())
+    background_tasks.append(asyncio.create_task(tomorrow_notification_loop()))
+    background_tasks.append(asyncio.create_task(weather_alert_loop()))
     yield
     # This runs when the app shuts down
-    if background_task:
+    for background_task in background_tasks:
         background_task.cancel()
+    for background_task in background_tasks:
         try:
             await background_task
         except asyncio.CancelledError:

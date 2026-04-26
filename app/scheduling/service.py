@@ -857,6 +857,11 @@ class SchedulingService:
             "requires_dry_weather": task.requires_dry_weather,
             "rescheduled_reason": task.rescheduled_reason,
             "weather_status": task.weather_status,
+            "completed_at": task.completed_at,
+            "early_completed": task.early_completed,
+            "early_completion_reason": task.early_completion_reason,
+            "early_completion_warning_acknowledged": task.early_completion_warning_acknowledged,
+            "early_completion_days": task.early_completion_days,
         }
 
     def calculate_farm_cycle_timeline(self, db: Session, field_id: int, user_id: Optional[int] = None) -> Dict[str, Any]:

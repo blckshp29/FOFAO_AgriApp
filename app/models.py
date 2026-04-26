@@ -40,7 +40,7 @@ class User(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True, nullable=False)
-    email = Column(String, unique=True, index=True, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=True)
     hashed_password = Column(String, nullable=False)
     full_name = Column(String)
     farm_name = Column(String)
@@ -143,6 +143,10 @@ class Field(Base):
     expected_yield_per_ha = Column(Float)
     actual_yield = Column(Float)
     market_price_per_unit = Column(Float)
+    gross_revenue = Column(Float)
+    operation_status = Column(String, default="ongoing")
+    status = Column(String, default="ongoing")
+    completed_at = Column(DateTime)
     location_lat = Column(Float)
     location_lon = Column(Float)
     farm_id = Column(Integer, ForeignKey("farms.id"))
@@ -158,6 +162,7 @@ class Field(Base):
     farm = relationship("Farm", back_populates="fields")
     scheduled_tasks = relationship("ScheduledTask", back_populates="field")
     projects = relationship("CropProject", back_populates="field")
+    completed_operation_histories = relationship("CompletedOperationHistory", back_populates="field")
 
 class Inventory(Base):
     __tablename__ = "inventory"
@@ -194,6 +199,7 @@ class CropProject(Base):
     expense_total = Column(Float, default=0)
     currency = Column(String, default="PHP")
     status = Column(Enum(ProjectStatus), default=ProjectStatus.PLANNED)
+    completed_at = Column(DateTime)
     start_date = Column(DateTime)
     end_date = Column(DateTime)
     notes = Column(Text)
@@ -212,6 +218,31 @@ class CropProject(Base):
     field = relationship("Field", back_populates="projects")
     financial_records = relationship("FinancialRecord", back_populates="project")
     scheduled_tasks = relationship("ScheduledTask", back_populates="project")
+    coconut_allocation = relationship("CoconutAllocation", back_populates="project", uselist=False)
+
+
+class CoconutAllocation(Base):
+    __tablename__ = "coconut_allocations"
+    __table_args__ = (
+        UniqueConstraint("project_id", name="uq_coconut_allocation_project"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("crop_projects.id"), nullable=False, index=True)
+    gross_revenue = Column(Float, nullable=False, default=0)
+    arrastre_cost = Column(Float, nullable=False, default=0)
+    food_cost = Column(Float, nullable=False, default=0)
+    number_of_labors = Column(Integer, nullable=False, default=1)
+    contract_type = Column(String, nullable=False)
+    net_revenue = Column(Float, nullable=False, default=0)
+    owner_share = Column(Float, nullable=False, default=0)
+    tenant_share = Column(Float, nullable=True)
+    labor_total = Column(Float, nullable=False, default=0)
+    labor_individual = Column(Float, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    project = relationship("CropProject", back_populates="coconut_allocation")
 
 class FinancialRecord(Base):
     __tablename__ = "financial_records"
@@ -276,6 +307,10 @@ class ScheduledTask(Base):
     cycle_day = Column(Integer, nullable=True)     # day offset within the cycle
     completed_at = Column(DateTime)
     confirmed_by_user = Column(Boolean, default=False)
+    early_completed = Column(Boolean, default=False)
+    early_completion_reason = Column(Text)
+    early_completion_warning_acknowledged = Column(Boolean, default=False)
+    early_completion_days = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_synced_at = Column(DateTime)
@@ -287,6 +322,37 @@ class ScheduledTask(Base):
     user = relationship("User", back_populates="scheduled_tasks")
     field = relationship("Field", back_populates="scheduled_tasks")
     project = relationship("CropProject", back_populates="scheduled_tasks")
+
+
+class CompletedOperationHistory(Base):
+    __tablename__ = "completed_operation_histories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    field_id = Column(Integer, ForeignKey("fields.id"), nullable=False, index=True)
+    farm_id = Column(Integer, ForeignKey("farms.id"), nullable=True, index=True)
+    project_id = Column(Integer, ForeignKey("crop_projects.id"), nullable=True, index=True)
+    crop_type = Column(Enum(CropType), nullable=False)
+    crop_variety = Column(String)
+    season_label = Column(String)
+    season_year = Column(Integer)
+    start_date = Column(DateTime)
+    completed_at = Column(DateTime, nullable=False)
+    planned_budget = Column(Float, default=0)
+    actual_cost = Column(Float, default=0)
+    actual_yield = Column(Float, default=0)
+    actual_revenue = Column(Float, default=0)
+    location = Column(String)
+    task_history = Column(Text)
+    category_costs = Column(Text)
+    financial_snapshot = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    owner = relationship("User")
+    field = relationship("Field", back_populates="completed_operation_histories")
+    farm = relationship("Farm")
+    project = relationship("CropProject")
 
 class WeatherData(Base):
     __tablename__ = "weather_data"

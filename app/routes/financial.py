@@ -1,18 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi import Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime, timedelta
 
 from .. import models, schemas
 from ..database import get_db
-from ..models import FinancialRecord, User, Field as FieldModel, CropProject
+from ..models import CompletedOperationHistory, CoconutAllocation, FinancialRecord, User, Field as FieldModel, CropProject, ProjectStatus
 from ..schemas import (
     FinancialRecordCreate,
     FinancialRecord as FinancialRecordSchema,
     CropProjectCreate,
     CropProjectUpdate,
     CropProject as CropProjectSchema,
+    ProjectCompletionResponse,
+    CompletedProjectListItem,
 )
 from ..financial.partial_budgeting import PartialBudgeting
 from ..notifications.service import send_push_to_user
@@ -228,8 +231,41 @@ def _normalize_rice_variety(raw: Optional[str]) -> str:
         return "NSIC RC222"
     return " ".join(raw.strip().upper().split())
 
-def _build_rice_budget_template(crop_variety: Optional[str], hectares: float) -> schemas.RiceBudgetTemplateResponse:
-    hectares = hectares if hectares and hectares > 0 else 1.0
+def _scale_allocations_to_budget(allocations: list, budget_total: float) -> list:
+    """
+    Scale recommended_amounts proportionally so they sum exactly to budget_total.
+    Percentages are recomputed after scaling.
+    """
+    if budget_total <= 0 or not allocations:
+        return allocations
+
+    base_total = sum(a.get("recommended_amount", 0.0) or 0.0 for a in allocations)
+    if base_total <= 0:
+        # Fallback to equal split if no base data
+        equal = round(budget_total / len(allocations), 2)
+        scaled = [{**a, "recommended_amount": equal} for a in allocations]
+    else:
+        factor = budget_total / base_total
+        scaled = []
+        running = 0.0
+        for idx, item in enumerate(allocations):
+            base_amt = item.get("recommended_amount", 0.0) or 0.0
+            amt = round(base_amt * factor, 2)
+            scaled.append({**item, "recommended_amount": amt})
+            running += amt
+        # Fix rounding drift on last item
+        drift = round(budget_total - running, 2)
+        scaled[-1]["recommended_amount"] = round(scaled[-1]["recommended_amount"] + drift, 2)
+
+    # Recompute percents based on scaled amounts
+    total_scaled = sum(a["recommended_amount"] for a in scaled) or 1.0
+    for a in scaled:
+        a["percent_of_total"] = round((a["recommended_amount"] / total_scaled) * 100.0, 2)
+    return scaled
+
+
+def _build_rice_budget_template(crop_variety: Optional[str], hectares: float, budget_total: float = 0.0) -> schemas.RiceBudgetTemplateResponse:
+    hectares = hectares if hectares and hectares > 0 else 1.0  # keep as metadata only
     normalized_variety = _normalize_rice_variety(crop_variety)
 
     allocations = []
@@ -238,9 +274,9 @@ def _build_rice_budget_template(crop_variety: Optional[str], hectares: float) ->
     budget_recommended = 0.0
 
     for category, min_amount, max_amount in RICE_BASE_COST_COMPONENTS:
-        min_scaled = round(min_amount * hectares, 2)
-        max_scaled = round(max_amount * hectares, 2)
-        recommended_scaled = round(((min_amount + max_amount) / 2.0) * hectares, 2)
+        min_scaled = round(min_amount, 2)
+        max_scaled = round(max_amount, 2)
+        recommended_scaled = round(((min_amount + max_amount) / 2.0), 2)
         budget_min += min_scaled
         budget_max += max_scaled
         budget_recommended += recommended_scaled
@@ -264,6 +300,8 @@ def _build_rice_budget_template(crop_variety: Optional[str], hectares: float) ->
         for item in allocations
     ]
 
+    allocations = _scale_allocations_to_budget(allocations, budget_total)
+
     return schemas.RiceBudgetTemplateResponse(
         crop_type="rice",
         crop_variety=normalized_variety,
@@ -271,12 +309,12 @@ def _build_rice_budget_template(crop_variety: Optional[str], hectares: float) ->
         currency="PHP",
         budget_min=round(budget_min, 2),
         budget_max=round(budget_max, 2),
-        budget_recommended=round(budget_recommended, 2),
+        budget_recommended=round(budget_total or budget_recommended, 2),
         allocations=allocations,
     )
 
-def _build_corn_budget_template(corn_type: Optional[str], hectares: float) -> schemas.CornBudgetTemplateResponse:
-    hectares = hectares if hectares and hectares > 0 else 1.0
+def _build_corn_budget_template(corn_type: Optional[str], hectares: float, budget_total: float = 0.0) -> schemas.CornBudgetTemplateResponse:
+    hectares = hectares if hectares and hectares > 0 else 1.0  # metadata only
     profile_key = _normalize_corn_type(corn_type)
     profile = CORN_COST_TEMPLATES[profile_key]
 
@@ -287,9 +325,9 @@ def _build_corn_budget_template(corn_type: Optional[str], hectares: float) -> sc
     budget_recommended = 0.0
 
     for category, min_amount, max_amount in raw_allocations:
-        min_scaled = round(min_amount * hectares, 2)
-        max_scaled = round(max_amount * hectares, 2)
-        recommended_scaled = round(((min_amount + max_amount) / 2.0) * hectares, 2)
+        min_scaled = round(min_amount, 2)
+        max_scaled = round(max_amount, 2)
+        recommended_scaled = round(((min_amount + max_amount) / 2.0), 2)
         budget_min += min_scaled
         budget_max += max_scaled
         budget_recommended += recommended_scaled
@@ -312,6 +350,8 @@ def _build_corn_budget_template(corn_type: Optional[str], hectares: float) -> sc
             }
         )
 
+    allocations = _scale_allocations_to_budget(allocations, budget_total)
+
     returns = profile["returns"]
     yield_min = round(returns["yield_min"] * hectares, 2)
     yield_max = round(returns["yield_max"] * hectares, 2)
@@ -325,7 +365,7 @@ def _build_corn_budget_template(corn_type: Optional[str], hectares: float) -> sc
         currency="PHP",
         budget_min=round(budget_min, 2),
         budget_max=round(budget_max, 2),
-        budget_recommended=round(budget_recommended, 2),
+        budget_recommended=round(budget_total or budget_recommended, 2),
         allocations=allocations,
         expected_returns=schemas.CornYieldIncomeEstimate(
             unit=returns["unit"],
@@ -341,53 +381,100 @@ def _build_corn_budget_template(corn_type: Optional[str], hectares: float) -> sc
         ),
     )
 
-def _build_coconut_budget_template(hectares: float) -> schemas.CoconutBudgetTemplateResponse:
-    hectares = hectares if hectares and hectares > 0 else 1.0
+def _build_coconut_budget_template(
+    gross_revenue: float,
+    arrastre_cost: float,
+    food_cost: float,
+    number_of_labors: int,
+    contract_type: Literal["50_50", "60_40", "tercia"],
+) -> schemas.CoconutBudgetTemplateResponse:
+    if number_of_labors <= 0:
+        raise HTTPException(status_code=400, detail="number_of_labors must be greater than 0")
 
-    allocations = []
-    budget_min = 0.0
-    budget_max = 0.0
-    budget_recommended = 0.0
+    if contract_type == "50_50":
+        deductions = arrastre_cost
+    else:
+        deductions = arrastre_cost + food_cost
 
-    for category, min_amount, max_amount in COCONUT_HARVEST_COST_COMPONENTS:
-        min_scaled = round(min_amount * hectares, 2)
-        max_scaled = round(max_amount * hectares, 2)
-        recommended_scaled = round(((min_amount + max_amount) / 2.0) * hectares, 2)
-        budget_min += min_scaled
-        budget_max += max_scaled
-        budget_recommended += recommended_scaled
-        allocations.append(
-            {
-                "category": category,
-                "min_amount": min_scaled,
-                "max_amount": max_scaled,
-                "recommended_amount": recommended_scaled,
-            }
-        )
+    net_revenue = max(gross_revenue - deductions, 0.0)
+    owner_share = 0.0
+    labor_total = 0.0
+    tenant_share = None
 
-    allocations = [
-        {
-            **item,
-            "percent_of_total": round(
-                (item["recommended_amount"] / budget_recommended * 100.0) if budget_recommended > 0 else 0.0,
-                2,
-            ),
-        }
-        for item in allocations
-    ]
+    if contract_type == "50_50":
+        owner_share = net_revenue * 0.5
+        labor_total = net_revenue * 0.5
+    elif contract_type == "60_40":
+        owner_share = net_revenue * 0.6
+        labor_total = net_revenue * 0.4
+    else:
+        owner_share = net_revenue / 3
+        labor_total = net_revenue / 3
+        tenant_share = net_revenue / 3
+
+    labor_individual = labor_total / number_of_labors
 
     return schemas.CoconutBudgetTemplateResponse(
-        crop_type="coconut",
-        hectares=round(hectares, 2),
-        currency="PHP",
-        budget_min=round(budget_min, 2),
-        budget_max=round(budget_max, 2),
-        budget_recommended=round(budget_recommended, 2),
-        allocations=allocations,
+        net_revenue=round(net_revenue, 2),
+        owner_share=round(owner_share, 2),
+        tenant_share=round(tenant_share, 2) if tenant_share is not None else None,
+        labor_total=round(labor_total, 2),
+        labor_individual=round(labor_individual, 2),
+        number_of_labors=number_of_labors,
     )
 
-def _build_vegetable_budget_template(vegetable_type: Optional[str], hectares: float) -> schemas.VegetableBudgetTemplateResponse:
-    hectares = hectares if hectares and hectares > 0 else 1.0
+
+def _get_owned_project_or_404(db: Session, project_id: int, user_id: int) -> CropProject:
+    project = db.query(CropProject).filter(
+        CropProject.id == project_id,
+        CropProject.owner_id == user_id,
+    ).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+def _get_project_with_access_check(db: Session, project_id: int, user_id: int) -> CropProject:
+    project = db.query(CropProject).filter(CropProject.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.owner_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this project")
+    return project
+
+
+def _apply_project_status_filter(query, status_filter: Optional[str]):
+    if not status_filter:
+        return query
+
+    normalized = status_filter.strip().lower()
+    if normalized == "ongoing":
+        return query.filter(CropProject.status.in_([ProjectStatus.PLANNED, ProjectStatus.ACTIVE]))
+    if normalized == "completed":
+        return query.filter(CropProject.status == ProjectStatus.COMPLETED)
+    if normalized in {member.value for member in ProjectStatus}:
+        return query.filter(CropProject.status == normalized)
+
+    raise HTTPException(
+        status_code=400,
+        detail="Invalid status filter. Use ongoing, completed, planned, active, or archived.",
+    )
+
+
+def _resolve_coconut_project_gross_revenue(project: CropProject, payload: schemas.CoconutAllocationSaveRequest) -> float:
+    if payload.gross_revenue is not None:
+        return payload.gross_revenue
+
+    if project.field and project.field.gross_revenue is not None:
+        return project.field.gross_revenue
+
+    raise HTTPException(
+        status_code=400,
+        detail="gross_revenue is required unless the linked field already has gross_revenue saved",
+    )
+
+def _build_vegetable_budget_template(vegetable_type: Optional[str], hectares: float, budget_total: float = 0.0) -> schemas.VegetableBudgetTemplateResponse:
+    hectares = hectares if hectares and hectares > 0 else 1.0  # metadata only
     vegetable_key = _normalize_vegetable_type(vegetable_type)
     template = VEGETABLE_BUDGET_TEMPLATES[vegetable_key]
 
@@ -398,25 +485,26 @@ def _build_vegetable_budget_template(vegetable_type: Optional[str], hectares: fl
     allocations = []
     for category, min_amount, max_amount in template["costs"]:
         recommended_amount = (min_amount + max_amount) / 2.0
-        scaled_recommended = round(recommended_amount * hectares, 2)
         allocations.append(
             {
                 "category": category,
-                "min_amount": round(min_amount * hectares, 2),
-                "max_amount": round(max_amount * hectares, 2),
-                "recommended_amount": scaled_recommended,
+                "min_amount": round(min_amount, 2),
+                "max_amount": round(max_amount, 2),
+                "recommended_amount": round(recommended_amount, 2),
                 "percent_of_total": round((recommended_amount / recommended_base_total) * 100.0, 2),
             }
         )
+
+    allocations = _scale_allocations_to_budget(allocations, budget_total)
 
     return schemas.VegetableBudgetTemplateResponse(
         crop_type="vegetables",
         vegetable_type=template["label"],
         hectares=round(hectares, 2),
         currency="PHP",
-        budget_min=round(template["budget_min"] * hectares, 2),
-        budget_max=round(template["budget_max"] * hectares, 2),
-        budget_recommended=round(((template["budget_min"] + template["budget_max"]) / 2.0) * hectares, 2),
+        budget_min=round(template["budget_min"], 2),
+        budget_max=round(template["budget_max"], 2),
+        budget_recommended=round(budget_total or ((template["budget_min"] + template["budget_max"]) / 2.0), 2),
         allocations=allocations,
     )
 
@@ -440,24 +528,77 @@ def _normalize_category(cat: str) -> str:
     return cat.strip().title()
 
 def _calculate_historical_allocations(db: Session, user_id: int, budget_total: float = 0.0):
-    history_count = db.query(FinancialRecord).filter(
-        FinancialRecord.owner_id == user_id,
-        FinancialRecord.transaction_type == "expense",
-        FinancialRecord.is_history == True,
-        FinancialRecord.description != SEEDED_HISTORY_DESCRIPTION
-    ).count()
-
-    base_query = db.query(FinancialRecord).filter(
-        FinancialRecord.owner_id == user_id,
-        FinancialRecord.transaction_type == "expense",
-        FinancialRecord.is_history == True,
-        FinancialRecord.description != SEEDED_HISTORY_DESCRIPTION
-    )
-
-    records = base_query.all()
+    completed_operations = db.query(CompletedOperationHistory).filter(
+        CompletedOperationHistory.owner_id == user_id
+    ).all()
 
     totals = {}
     total_spend = 0.0
+    used_completed_histories = 0
+    for operation in completed_operations:
+        category_costs = {}
+        if operation.category_costs:
+            if isinstance(operation.category_costs, str):
+                try:
+                    parsed = json.loads(operation.category_costs)
+                    if isinstance(parsed, dict):
+                        category_costs = parsed
+                except Exception:
+                    category_costs = {}
+            elif isinstance(operation.category_costs, dict):
+                category_costs = operation.category_costs
+
+        if category_costs:
+            used_completed_histories += 1
+            for category, amount in category_costs.items():
+                normalized = _normalize_category(category)
+                numeric_amount = float(amount or 0.0)
+                totals[normalized] = totals.get(normalized, 0.0) + numeric_amount
+                total_spend += numeric_amount
+
+    if used_completed_histories > 0 and total_spend > 0:
+        for cat in DEFAULT_HISTORICAL_CATEGORIES:
+            totals.setdefault(cat, 0.0)
+
+        allocations = []
+        for cat, amt in totals.items():
+            pct = (amt / total_spend * 100.0) if total_spend > 0 else 0.0
+            allocated_amount = (budget_total * (pct / 100.0)) if budget_total > 0 else 0.0
+            allocations.append({
+                "category": cat,
+                "historical_cost": round(amt, 2),
+                "percent_of_total": round(pct, 2),
+                "allocated_amount": round(allocated_amount, 2)
+            })
+
+        allocations.sort(key=lambda x: x["percent_of_total"], reverse=True)
+        return {
+            "total_historical_spend": round(total_spend, 2),
+            "used_history_records": True,
+            "history_source": "completed_operation_histories",
+            "budget_total": round(budget_total, 2),
+            "allocations": allocations
+        }
+
+    base_query = db.query(FinancialRecord).outerjoin(
+        CropProject, FinancialRecord.project_id == CropProject.id
+    ).filter(
+        FinancialRecord.transaction_type == "expense",
+        FinancialRecord.description != SEEDED_HISTORY_DESCRIPTION,
+        or_(
+            (
+                or_(FinancialRecord.owner_id == user_id, FinancialRecord.owner_id == 0)
+            ) & (FinancialRecord.is_history == True),
+            (
+                (CropProject.owner_id == user_id)
+                & (CropProject.status == ProjectStatus.COMPLETED)
+            ),
+        ),
+    )
+
+    history_count = base_query.count()
+
+    records = base_query.all()
     for r in records:
         cat = _normalize_category(r.category)
         totals[cat] = totals.get(cat, 0.0) + (r.amount or 0.0)
@@ -482,6 +623,7 @@ def _calculate_historical_allocations(db: Session, user_id: int, budget_total: f
     return {
         "total_historical_spend": round(total_spend, 2),
         "used_history_records": history_count > 0,
+        "history_source": "financial_records",
         "budget_total": round(budget_total, 2),
         "allocations": allocations
     }
@@ -604,42 +746,154 @@ def get_historical_budget_allocation(
         budget_total = project.budget_total or 0.0
     return _calculate_historical_allocations(db, current_user.id, budget_total)
 
-@router.get("/financial/budget/corn-template", response_model=schemas.CornBudgetTemplateResponse)
+def _resolve_budget(project_id: Optional[int], budget_total: Optional[float], db: Session, user_id: int) -> float:
+    if budget_total is not None and budget_total > 0:
+        return budget_total
+    if project_id:
+        project = db.query(CropProject).filter(
+            CropProject.id == project_id,
+            CropProject.owner_id == user_id
+        ).first()
+        if project and project.budget_total and project.budget_total > 0:
+            return project.budget_total
+    # Fallback: no user budget supplied; allow builders to use their base recommended totals
+    return 0.0
+
+
+@router.get("/financial/budget/corn-template")
 def get_corn_budget_template(
     corn_type: str = "yellow",
     hectares: float = 1.0,
+    budget_total: Optional[float] = Query(default=None, alias="budget"),
+    project_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    return _build_corn_budget_template(corn_type, hectares)
+    effective_budget = _resolve_budget(project_id, budget_total, db, current_user.id)
+    allocations = _calculate_historical_allocations(db, current_user.id, effective_budget)
+    if allocations["total_historical_spend"] <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No historical data available. Please input expense records first."
+        )
+    return allocations
 
-@router.get("/financial/budget/rice-template", response_model=schemas.RiceBudgetTemplateResponse)
+@router.get("/financial/budget/rice-template")
 def get_rice_budget_template(
     crop_variety: Optional[str] = None,
     variety: Optional[str] = Query(default=None),
     hectares: float = 1.0,
+    budget_total: Optional[float] = Query(default=None, alias="budget"),
+    project_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    selected_variety = crop_variety or variety
-    return _build_rice_budget_template(selected_variety, hectares)
+    raise HTTPException(
+        status_code=400,
+        detail="Rice budget allocation not yet implemented; please provide rice historical expense data first."
+    )
 
 @router.get("/financial/budget/coconut-template", response_model=schemas.CoconutBudgetTemplateResponse)
+@router.get("/financial/coconut-allocation", response_model=schemas.CoconutBudgetTemplateResponse)
 def get_coconut_budget_template(
-    hectares: float = 1.0,
+    gross_revenue: float = Query(..., ge=0),
+    arrastre_cost: float = Query(default=0.0, ge=0),
+    food_cost: float = Query(default=0.0, ge=0),
+    number_of_labors: int = Query(..., gt=0),
+    contract_type: Literal["50_50", "60_40", "tercia"] = Query(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    return _build_coconut_budget_template(hectares)
+    return _build_coconut_budget_template(
+        gross_revenue=gross_revenue,
+        arrastre_cost=arrastre_cost,
+        food_cost=food_cost,
+        number_of_labors=number_of_labors,
+        contract_type=contract_type,
+    )
 
-@router.get("/financial/budget/vegetable-template", response_model=schemas.VegetableBudgetTemplateResponse)
+@router.get("/financial/budget/vegetable-template")
 def get_vegetable_budget_template(
     vegetable_type: str = "eggplant",
     hectares: float = 1.0,
+    budget_total: Optional[float] = Query(default=None, alias="budget"),
+    project_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    return _build_vegetable_budget_template(vegetable_type, hectares)
+    raise HTTPException(
+        status_code=400,
+        detail="Vegetable budget allocation not yet implemented; please provide vegetable historical expense data first."
+    )
+
+
+@router.post(
+    "/financial/projects/{project_id}/coconut-allocation",
+    response_model=schemas.CoconutAllocationResponse,
+)
+def save_project_coconut_allocation(
+    project_id: int,
+    payload: schemas.CoconutAllocationSaveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = _get_owned_project_or_404(db, project_id, current_user.id)
+    if project.crop_type != models.CropType.COCONUT:
+        raise HTTPException(status_code=400, detail="Coconut allocation is only available for coconut projects")
+
+    gross_revenue = _resolve_coconut_project_gross_revenue(project, payload)
+    allocation = _build_coconut_budget_template(
+        gross_revenue=gross_revenue,
+        arrastre_cost=payload.arrastre_cost,
+        food_cost=payload.food_cost,
+        number_of_labors=payload.number_of_labors,
+        contract_type=payload.contract_type,
+    )
+
+    existing = db.query(CoconutAllocation).filter(CoconutAllocation.project_id == project_id).first()
+    values = {
+        "gross_revenue": gross_revenue,
+        "arrastre_cost": payload.arrastre_cost,
+        "food_cost": payload.food_cost,
+        "number_of_labors": payload.number_of_labors,
+        "contract_type": payload.contract_type,
+        "net_revenue": allocation.net_revenue,
+        "owner_share": allocation.owner_share,
+        "tenant_share": allocation.tenant_share,
+        "labor_total": allocation.labor_total,
+        "labor_individual": allocation.labor_individual,
+    }
+
+    if existing:
+        for key, value in values.items():
+            setattr(existing, key, value)
+        record = existing
+    else:
+        record = CoconutAllocation(project_id=project_id, **values)
+        db.add(record)
+
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+@router.get(
+    "/financial/projects/{project_id}/coconut-allocation",
+    response_model=schemas.CoconutAllocationResponse,
+)
+def get_project_coconut_allocation(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = _get_owned_project_or_404(db, project_id, current_user.id)
+    if project.crop_type != models.CropType.COCONUT:
+        raise HTTPException(status_code=400, detail="Coconut allocation is only available for coconut projects")
+
+    allocation = db.query(CoconutAllocation).filter(CoconutAllocation.project_id == project_id).first()
+    if not allocation:
+        raise HTTPException(status_code=404, detail="Coconut allocation not found for this project")
+    return allocation
 
 @router.post("/financial/budget/check")
 def check_budget_logic(
@@ -768,8 +1022,9 @@ def compare_financial_insights(
     current_user: User = Depends(get_current_user)
 ):
     projects = db.query(CropProject).filter(
-        CropProject.owner_id == current_user.id
-    ).order_by(CropProject.start_date.desc().nullslast(), CropProject.created_at.desc()).limit(2).all()
+        CropProject.owner_id == current_user.id,
+        CropProject.status == ProjectStatus.COMPLETED
+    ).order_by(CropProject.completed_at.desc().nullslast(), CropProject.start_date.desc().nullslast(), CropProject.created_at.desc()).limit(2).all()
 
     if len(projects) < 2:
         raise HTTPException(status_code=400, detail="Not enough projects to compare")
@@ -1035,6 +1290,7 @@ def list_projects(
     field_id: Optional[int] = None,
     farm_id: Optional[int] = None,
     crop_type: Optional[str] = None,
+    status: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1045,7 +1301,40 @@ def list_projects(
         query = query.filter(CropProject.farm_id == farm_id)
     if crop_type:
         query = query.filter(CropProject.crop_type == crop_type)
-    return query.all()
+    query = _apply_project_status_filter(query, status)
+    return query.order_by(CropProject.completed_at.desc().nullslast(), CropProject.created_at.desc()).all()
+
+
+@router.get("/financial/projects/completed", response_model=List[CompletedProjectListItem])
+def list_completed_projects(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    projects = db.query(CropProject).filter(
+        CropProject.owner_id == current_user.id,
+        CropProject.status == ProjectStatus.COMPLETED
+    ).order_by(CropProject.completed_at.desc().nullslast(), CropProject.created_at.desc()).all()
+
+    return [
+        CompletedProjectListItem(
+            id=project.id,
+            name=project.name,
+            field_id=project.field_id,
+            field_name=project.field.name if project.field else None,
+            crop_type=project.crop_type,
+            crop_variety=project.crop_variety,
+            area_hectares=project.field.area_hectares if project.field else None,
+            started_at=project.start_date,
+            created_at=project.created_at,
+            completed_at=project.completed_at,
+            status=project.status,
+            gross_revenue=project.field.gross_revenue if project.field else None,
+            total_budget=project.budget_total or 0,
+            total_expenses=project.expense_total or 0,
+            total_income=project.income_total or 0,
+        )
+        for project in projects
+    ]
 
 @router.get("/financial/projects/{project_id}", response_model=CropProjectSchema)
 def get_project(
@@ -1075,9 +1364,49 @@ def update_project(
     project = query.first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    query.update(payload.model_dump(exclude_unset=True), synchronize_session=False)
+    updates = payload.model_dump(exclude_unset=True)
+    new_status = updates.get("status")
+    if new_status == ProjectStatus.COMPLETED:
+        updates["completed_at"] = project.completed_at or datetime.utcnow()
+        if project.end_date is None and "end_date" not in updates:
+            updates["end_date"] = updates["completed_at"]
+    elif new_status and new_status != ProjectStatus.COMPLETED:
+        updates["completed_at"] = None
+
+    query.update(updates, synchronize_session=False)
     db.commit()
     return query.first()
+
+
+@router.patch("/financial/projects/{project_id}/complete", response_model=ProjectCompletionResponse)
+def complete_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    project = _get_project_with_access_check(db, project_id, current_user.id)
+
+    if project.status == ProjectStatus.COMPLETED:
+        raise HTTPException(status_code=400, detail="Project is already completed")
+
+    project.status = ProjectStatus.COMPLETED
+    project.completed_at = datetime.utcnow()
+    if project.end_date is None:
+        project.end_date = project.completed_at
+
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+
+    return ProjectCompletionResponse(
+        id=project.id,
+        field_id=project.field_id,
+        crop_type=project.crop_type,
+        crop_variety=project.crop_variety,
+        status=project.status,
+        completed_at=project.completed_at,
+        message="Project marked as completed and preserved for historical analysis.",
+    )
 
 @router.delete("/financial/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(
@@ -1085,6 +1414,7 @@ def delete_project(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    db.query(CoconutAllocation).filter(CoconutAllocation.project_id == project_id).delete(synchronize_session=False)
     query = db.query(CropProject).filter(
         CropProject.id == project_id,
         CropProject.owner_id == current_user.id

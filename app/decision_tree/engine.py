@@ -10,7 +10,7 @@ import joblib
 from sqlalchemy.orm import Session
 
 from config import config
-from ..models import Field, ScheduledTask, FinancialRecord, WeatherData, DecisionTreeModel
+from ..models import CompletedOperationHistory, Field, ScheduledTask, FinancialRecord, WeatherData, DecisionTreeModel
 from ..schemas import DecisionTreeRequest, DecisionTreeResponse, CropTypeEnum
 from ..weather.service import WeatherService
 
@@ -204,6 +204,46 @@ class DecisionTreeEngine:
                     "success_score": 1 if task.status == "completed" else 0
                 }
                 
+                training_data.append(data_point)
+
+        completed_operations = db.query(CompletedOperationHistory).filter(
+            CompletedOperationHistory.owner_id == user_id,
+            CompletedOperationHistory.crop_type == crop_type
+        ).all()
+
+        for operation in completed_operations:
+            task_history = []
+            if operation.task_history:
+                try:
+                    parsed = json.loads(operation.task_history)
+                    if isinstance(parsed, list):
+                        task_history = parsed
+                except Exception:
+                    task_history = []
+
+            for task in task_history:
+                scheduled_date = None
+                if task.get("scheduled_date"):
+                    try:
+                        scheduled_date = datetime.fromisoformat(task["scheduled_date"])
+                    except Exception:
+                        scheduled_date = None
+
+                data_point = {
+                    "field_id": operation.field_id,
+                    "task_type": task.get("task_type"),
+                    "days_since_planting": (
+                        (scheduled_date - operation.start_date).days
+                        if scheduled_date and operation.start_date
+                        else task.get("cycle_day", 0) or 0
+                    ),
+                    "temperature": 25,
+                    "humidity": 60,
+                    "soil_moisture": 30,
+                    "budget_utilization": task.get("actual_cost") or task.get("estimated_cost") or 0,
+                    "previous_yield": operation.actual_yield or 0,
+                    "success_score": 1 if task.get("status") == "completed" else 0,
+                }
                 training_data.append(data_point)
         
         return training_data
