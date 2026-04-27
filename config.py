@@ -5,12 +5,20 @@ load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def _normalize_database_url(raw_url: str) -> str:
+    if not raw_url:
+        return raw_url
+    if raw_url.startswith("postgres://"):
+        raw_url = raw_url.replace("postgres://", "postgresql://", 1)
+    return raw_url
+
 class Config:
     # 1. Database
-    DATABASE_URL = os.getenv(
+    DATABASE_URL = _normalize_database_url(os.getenv(
         "DATABASE_URL", 
         f"sqlite:///{os.path.join(BASE_DIR, 'agricultural_operations.db')}"
-    )
+    ))
     
     # 2. OpenWeatherMap Settings
     OPENWEATHER_BASE_URL = "https://api.openweathermap.org/data/2.5"

@@ -8,10 +8,27 @@ from config import config
 # Your models.py should import this Base from here.
 Base = declarative_base() 
 
-# 2. Create SQLite database engine
+def _engine_options(database_url: str) -> dict:
+    options = {
+        "pool_pre_ping": True,
+    }
+
+    if "sqlite" in database_url:
+        options["connect_args"] = {"check_same_thread": False}
+    elif database_url.startswith("postgresql://") and "sslmode=" not in database_url:
+        separator = "&" if "?" in database_url else "?"
+        database_url = f"{database_url}{separator}sslmode=require"
+
+    options["url"] = database_url
+    return options
+
+
+_db_options = _engine_options(config.DATABASE_URL)
+
+# 2. Create database engine
 engine = create_engine(
-    config.DATABASE_URL, 
-    connect_args={"check_same_thread": False} if "sqlite" in config.DATABASE_URL else {}
+    _db_options.pop("url"),
+    **_db_options,
 )
 
 # 3. Create session factory

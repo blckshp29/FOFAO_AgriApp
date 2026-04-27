@@ -31,8 +31,13 @@ class AsyncOpenWeatherService:
     def format_current_weather(self, data: Dict[str, Any]) -> Dict[str, Any]:
         weather = ((data.get("weather") or [{}])[0]) or {}
         main = data.get("main") or {}
+        wind = data.get("wind") or {}
+        rain = data.get("rain") or {}
         return {
             "temperature": main.get("temp"),
+            "humidity": main.get("humidity"),
+            "wind_speed": wind.get("speed"),
+            "precipitation": rain.get("1h", rain.get("3h", 0.0)) or 0.0,
             "condition": weather.get("main"),
             "description": weather.get("description"),
             "icon": weather.get("icon"),

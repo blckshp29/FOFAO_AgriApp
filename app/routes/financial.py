@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi import Query
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from datetime import datetime, timedelta
 
 from .. import models, schemas
@@ -628,6 +628,62 @@ def _calculate_historical_allocations(db: Session, user_id: int, budget_total: f
         "allocations": allocations
     }
 
+
+def _recalculate_project_totals(db: Session, project: CropProject) -> CropProject:
+    expenses = db.query(FinancialRecord).filter(
+        FinancialRecord.owner_id == project.owner_id,
+        FinancialRecord.project_id == project.id,
+        FinancialRecord.is_history == False,
+        FinancialRecord.transaction_type == "expense",
+    ).all()
+    incomes = db.query(FinancialRecord).filter(
+        FinancialRecord.owner_id == project.owner_id,
+        FinancialRecord.project_id == project.id,
+        FinancialRecord.is_history == False,
+        FinancialRecord.transaction_type == "income",
+    ).all()
+
+    expense_total = round(sum(record.amount or 0.0 for record in expenses), 2)
+    income_total = round(sum(record.amount or 0.0 for record in incomes), 2)
+    budget_total = round(project.budget_total or 0.0, 2)
+
+    project.expense_total = expense_total
+    project.income_total = income_total
+    project.budget_total = budget_total
+    project.budget_remaining = round(budget_total - expense_total, 2)
+    return project
+
+
+def _build_budget_allocation_payload(summary: Dict[str, Any], budget_total: float) -> Dict[str, Any]:
+    effective_budget = round(budget_total or summary.get("total_historical_spend", 0.0) or 0.0, 2)
+    allocations = summary.get("allocations", []) or []
+
+    if not allocations and effective_budget > 0:
+        equal_percent = round(100.0 / len(DEFAULT_HISTORICAL_CATEGORIES), 2)
+        allocations = [
+            {
+                "category": category,
+                "historical_cost": 0.0,
+                "percent_of_total": equal_percent,
+                "allocated_amount": round(effective_budget / len(DEFAULT_HISTORICAL_CATEGORIES), 2),
+            }
+            for category in DEFAULT_HISTORICAL_CATEGORIES
+        ]
+
+    budget_min = round(effective_budget * 0.9, 2) if effective_budget > 0 else 0.0
+    budget_max = round(effective_budget * 1.1, 2) if effective_budget > 0 else 0.0
+
+    return {
+        "budget_total": effective_budget,
+        "budget_recommended": effective_budget,
+        "budget_min": budget_min,
+        "budget_max": budget_max,
+        "used_history_records": summary.get("used_history_records", False),
+        "history_source": summary.get("history_source"),
+        "total_historical_spend": round(summary.get("total_historical_spend", 0.0), 2),
+        "allocations": allocations,
+    }
+
 @router.post("/financial/records", response_model=FinancialRecordSchema)
 def create_financial_record(
     record: FinancialRecordCreate,
@@ -731,20 +787,14 @@ def confirm_over_budget_record(
 
 @router.get("/financial/budget/allocation")
 def get_historical_budget_allocation(
+    budget_total: Optional[float] = Query(default=None, alias="budget"),
     project_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    budget_total = 0.0
-    if project_id:
-        project = db.query(CropProject).filter(
-            CropProject.id == project_id,
-            CropProject.owner_id == current_user.id
-        ).first()
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-        budget_total = project.budget_total or 0.0
-    return _calculate_historical_allocations(db, current_user.id, budget_total)
+    effective_budget = _resolve_budget(project_id, budget_total, db, current_user.id)
+    summary = _calculate_historical_allocations(db, current_user.id, effective_budget)
+    return _build_budget_allocation_payload(summary, effective_budget)
 
 def _resolve_budget(project_id: Optional[int], budget_total: Optional[float], db: Session, user_id: int) -> float:
     if budget_total is not None and budget_total > 0:
@@ -796,14 +846,30 @@ def get_rice_budget_template(
 @router.get("/financial/budget/coconut-template", response_model=schemas.CoconutBudgetTemplateResponse)
 @router.get("/financial/coconut-allocation", response_model=schemas.CoconutBudgetTemplateResponse)
 def get_coconut_budget_template(
-    gross_revenue: float = Query(..., ge=0),
+    gross_revenue: Optional[float] = Query(default=None, ge=0),
     arrastre_cost: float = Query(default=0.0, ge=0),
     food_cost: float = Query(default=0.0, ge=0),
     number_of_labors: int = Query(..., gt=0),
     contract_type: Literal["50_50", "60_40", "tercia"] = Query(...),
+    project_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    if gross_revenue is None and project_id is not None:
+        project = _get_owned_project_or_404(db, project_id, current_user.id)
+        gross_revenue = _resolve_coconut_project_gross_revenue(
+            project,
+            schemas.CoconutAllocationSaveRequest(
+                gross_revenue=None,
+                arrastre_cost=arrastre_cost,
+                food_cost=food_cost,
+                number_of_labors=number_of_labors,
+                contract_type=contract_type,
+            ),
+        )
+    if gross_revenue is None:
+        raise HTTPException(status_code=400, detail="gross_revenue is required")
+
     return _build_coconut_budget_template(
         gross_revenue=gross_revenue,
         arrastre_cost=arrastre_cost,
@@ -952,6 +1018,7 @@ def get_financial_insight_summary(
         ).first()
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
+        project = _recalculate_project_totals(db, project)
         budget_total = project.budget_total or 0
         expenses_total = project.expense_total or 0
         income_total = project.income_total or 0
@@ -1088,26 +1155,19 @@ def get_financial_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if not start_date:
-        start_date = datetime.now() - timedelta(days=30)
-    if not end_date:
-        end_date = datetime.now()
-    
     records_query = db.query(FinancialRecord).filter(
         FinancialRecord.owner_id == current_user.id,
-        FinancialRecord.is_history == False,
-        FinancialRecord.date >= start_date,
-        FinancialRecord.date <= end_date
+        FinancialRecord.is_history == False
     )
+    if start_date:
+        records_query = records_query.filter(FinancialRecord.date >= start_date)
+    if end_date:
+        records_query = records_query.filter(FinancialRecord.date <= end_date)
     if field_id:
         records_query = records_query.filter(FinancialRecord.field_id == field_id)
     if project_id:
         records_query = records_query.filter(FinancialRecord.project_id == project_id)
     records = records_query.all()
-
-    # DEBUG PRINT: Check your terminal! 
-    # This will tell us if the query found anything at all.
-    print(f"DEBUG: Found {len(records)} records for user {current_user.id} in this date range.")
 
     total_income = 0
     total_expenses = 0
@@ -1283,7 +1343,7 @@ def create_project(
     db.add(db_project)
     db.commit()
     db.refresh(db_project)
-    return db_project
+    return _recalculate_project_totals(db, db_project)
 
 @router.get("/financial/projects", response_model=List[CropProjectSchema])
 def list_projects(
@@ -1302,7 +1362,8 @@ def list_projects(
     if crop_type:
         query = query.filter(CropProject.crop_type == crop_type)
     query = _apply_project_status_filter(query, status)
-    return query.order_by(CropProject.completed_at.desc().nullslast(), CropProject.created_at.desc()).all()
+    projects = query.order_by(CropProject.completed_at.desc().nullslast(), CropProject.created_at.desc()).all()
+    return [_recalculate_project_totals(db, project) for project in projects]
 
 
 @router.get("/financial/projects/completed", response_model=List[CompletedProjectListItem])
@@ -1333,7 +1394,7 @@ def list_completed_projects(
             total_expenses=project.expense_total or 0,
             total_income=project.income_total or 0,
         )
-        for project in projects
+        for project in [_recalculate_project_totals(db, project) for project in projects]
     ]
 
 @router.get("/financial/projects/{project_id}", response_model=CropProjectSchema)
@@ -1348,7 +1409,7 @@ def get_project(
     ).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return project
+    return _recalculate_project_totals(db, project)
 
 @router.patch("/financial/projects/{project_id}", response_model=CropProjectSchema)
 def update_project(
@@ -1375,7 +1436,8 @@ def update_project(
 
     query.update(updates, synchronize_session=False)
     db.commit()
-    return query.first()
+    project = query.first()
+    return _recalculate_project_totals(db, project)
 
 
 @router.patch("/financial/projects/{project_id}/complete", response_model=ProjectCompletionResponse)

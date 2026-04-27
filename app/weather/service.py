@@ -84,16 +84,25 @@ class WeatherService:
             wind = entry.get("wind", {})
             weather_items = entry.get("weather", [])
             weather_main = weather_items[0].get("main") if weather_items else None
+            weather_description = weather_items[0].get("description") if weather_items else None
+            weather_icon = weather_items[0].get("icon") if weather_items else None
             weather_code = weather_items[0].get("id") if weather_items else None
 
             hourly_entry = {
                 "time": dt.isoformat(),
+                "temperature": main.get("temp"),
                 "temperature_2m": main.get("temp"),
+                "humidity": main.get("humidity"),
                 "relative_humidity_2m": main.get("humidity"),
+                "precipitation": rain,
                 "precipitation": rain,
                 "rain": rain,
                 "snowfall": snow,
+                "wind_speed": wind.get("speed"),
                 "wind_speed_10m": wind.get("speed"),
+                "condition": weather_main,
+                "description": weather_description,
+                "icon": weather_icon,
                 "weather_main": weather_main,
                 "weather_code": weather_code,
                 "soil_moisture_0_1cm": None
@@ -103,20 +112,36 @@ class WeatherService:
 
             day = daily_map.setdefault(date_key, {
                 "date": date_key,
+                "temperature": None,
                 "temperature_2m_max": None,
                 "temperature_2m_min": None,
+                "humidity": [],
+                "precipitation": 0.0,
                 "precipitation_sum": 0.0,
+                "wind_speed": 0.0,
                 "wind_speed_max": 0.0,
+                "condition": weather_main,
+                "description": weather_description,
+                "icon": weather_icon,
                 "weather_main": weather_main,
                 "weather_code": weather_code
             })
             temp = main.get("temp")
             if temp is not None:
+                day["temperature"] = temp if day["temperature"] is None else day["temperature"]
                 day["temperature_2m_max"] = temp if day["temperature_2m_max"] is None else max(day["temperature_2m_max"], temp)
                 day["temperature_2m_min"] = temp if day["temperature_2m_min"] is None else min(day["temperature_2m_min"], temp)
+            if main.get("humidity") is not None:
+                day["humidity"].append(main.get("humidity"))
+            day["precipitation"] += rain
             day["precipitation_sum"] += rain
             wind_speed = wind.get("speed", 0.0) or 0.0
+            day["wind_speed"] = max(day["wind_speed"], wind_speed)
             day["wind_speed_max"] = max(day["wind_speed_max"], wind_speed)
+
+        for day in daily_map.values():
+            humidity_values = day.pop("humidity", [])
+            day["humidity"] = round(sum(humidity_values) / len(humidity_values), 2) if humidity_values else None
 
         processed_data["daily"] = list(daily_map.values())
         processed_data["daily_data"] = processed_data["daily"]
@@ -181,17 +206,24 @@ class WeatherService:
             date_key = r.date.strftime("%Y-%m-%d")
             hourly_entry = {
                 "time": r.date.isoformat(),
+                "temperature": r.temperature_2m,
                 "temperature_2m": r.temperature_2m,
+                "precipitation": r.precipitation,
                 "precipitation": r.precipitation,
                 "rain": r.rain,
                 "snowfall": r.snowfall,
+                "humidity": r.relative_humidity_2m,
                 "relative_humidity_2m": r.relative_humidity_2m,
                 "soil_moisture_0_1cm": r.soil_moisture_0_1cm,
                 "soil_moisture_1_3cm": r.soil_moisture_1_3cm,
                 "soil_moisture_3_9cm": r.soil_moisture_3_9cm,
                 "soil_moisture_9_27cm": r.soil_moisture_9_27cm,
                 "soil_moisture_27_81cm": r.soil_moisture_27_81cm,
+                "wind_speed": r.wind_speed_10m,
                 "weather_main": r.weather_main,
+                "condition": r.weather_main,
+                "description": r.weather_main,
+                "icon": None,
                 "weather_code": r.weather_code,
                 "wind_speed_10m": r.wind_speed_10m,
             }
@@ -200,23 +232,39 @@ class WeatherService:
 
             day = daily_map.setdefault(date_key, {
                 "date": date_key,
+                "temperature": None,
                 "temperature_2m_max": None,
                 "temperature_2m_min": None,
+                "humidity": [],
+                "precipitation": 0.0,
                 "precipitation_sum": 0.0,
+                "wind_speed": 0.0,
                 "wind_speed_max": 0.0,
+                "condition": r.weather_main,
+                "description": r.weather_main,
+                "icon": None,
                 "weather_main": r.weather_main,
                 "weather_code": r.weather_code,
             })
 
             temp = r.temperature_2m
             if temp is not None:
+                day["temperature"] = temp if day["temperature"] is None else day["temperature"]
                 day["temperature_2m_max"] = temp if day["temperature_2m_max"] is None else max(day["temperature_2m_max"], temp)
                 day["temperature_2m_min"] = temp if day["temperature_2m_min"] is None else min(day["temperature_2m_min"], temp)
 
             precipitation = r.precipitation or 0.0
+            if r.relative_humidity_2m is not None:
+                day["humidity"].append(r.relative_humidity_2m)
+            day["precipitation"] += precipitation
             day["precipitation_sum"] += precipitation
             wind_speed = r.wind_speed_10m or 0.0
+            day["wind_speed"] = max(day["wind_speed"], wind_speed)
             day["wind_speed_max"] = max(day["wind_speed_max"], wind_speed)
+
+        for day in daily_map.values():
+            humidity_values = day.pop("humidity", [])
+            day["humidity"] = round(sum(humidity_values) / len(humidity_values), 2) if humidity_values else None
 
         fallback_data["hourly"].sort(key=lambda entry: entry["time"])
         fallback_data["hourly_data"] = fallback_data["hourly"]

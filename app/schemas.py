@@ -826,6 +826,9 @@ class WeatherForecastRequest(BaseModel):
 
 class WeatherCurrentResponse(BaseModel):
     temperature: Optional[float] = None
+    humidity: Optional[float] = None
+    wind_speed: Optional[float] = None
+    precipitation: Optional[float] = None
     condition: Optional[str] = None
     description: Optional[str] = None
     icon: Optional[str] = None

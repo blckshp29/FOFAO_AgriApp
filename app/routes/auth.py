@@ -11,13 +11,14 @@ from typing import Optional
 from ..database import get_db
 from ..models import User, OtpCode
 from ..schemas import RegisterRequest, User as UserSchema, Token, UserLogin, OtpRequest, OtpVerify, OtpResponse
+from config import config
 
 router = APIRouter()
 
 # Security
-SECRET_KEY = "your-secret-key-here"  # Change in production!
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+SECRET_KEY = config.SECRET_KEY
+ALGORITHM = config.ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = config.ACCESS_TOKEN_EXPIRE_MINUTES
 
 pwd_context = CryptContext(schemes=["bcrypt_sha256"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/token")
@@ -36,6 +37,7 @@ def get_password_hash(password: str) -> str:
     return hashed.decode('utf-8')
 
 def authenticate_user(db: Session, identifier: str, password: str):
+    identifier = identifier.strip()
     user = db.query(User).filter(
         (User.username == identifier) | (User.email == identifier) | (User.mobile_number == identifier)
     ).first()
@@ -64,12 +66,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
-        print(f"DEBUG: Username from token: {username}")
         if username is None:
-            print("DEBUG: Sub key is missing!")
             raise credentials_exception
-    except JWTError as error:
-        print(f"DEBUG: JWT Decode failed: {error}")
+    except JWTError:
         raise credentials_exception
     user = db.query(User).filter(User.username == username).first()
     if user is None:
@@ -78,15 +77,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
 
 @router.post("/register")
 def register(payload: RegisterRequest, db: Session = Depends(get_db)):
-    print("DEBUG: Register endpoint hit!") # <--- Add this
+    normalized_username = payload.username.strip()
     # Check if user exists
-    db_user = db.query(User).filter(User.username == payload.username).first()
-    print(f"DEBUG: Found user: {db_user}") # <--- Add this
+    db_user = db.query(User).filter(User.username == normalized_username).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Username already registered")
     
     # Basic validation
-    if not payload.username.strip():
+    if not normalized_username:
         raise HTTPException(status_code=400, detail="Username cannot be empty")
     if len(payload.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
@@ -94,9 +92,9 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     # Create new user
     hashed_password = get_password_hash(payload.password)
     # Ensure legacy NOT NULL email columns stay satisfied even without a real email
-    normalized_email = f"{payload.username}@placeholder.local"
+    normalized_email = f"{normalized_username}@placeholder.local"
     db_user = User(
-        username=payload.username,
+        username=normalized_username,
         email=normalized_email,
         hashed_password=hashed_password
     )
