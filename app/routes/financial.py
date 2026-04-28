@@ -44,6 +44,14 @@ DEFAULT_ALLOCATION_PERCENTAGES = {
     "Miscellaneous": 6.0,
 }
 
+VISIBLE_ALLOCATION_CATEGORIES = [
+    "Seeds",
+    "Fertilizers",
+    "Chemicals",
+    "Labor",
+    "Miscellaneous",
+]
+
 RICE_BASE_COST_COMPONENTS = [
     ("Land Preparation", 11000.0, 14000.0),
     ("Seeds", 2500.0, 3500.0),
@@ -696,8 +704,74 @@ def _build_budget_allocation_payload(summary: Dict[str, Any], budget_total: floa
         "used_history_records": summary.get("used_history_records", False) and has_meaningful_history,
         "history_source": summary.get("history_source") if has_meaningful_history else "default_recommended_split",
         "total_historical_spend": round(summary.get("total_historical_spend", 0.0), 2),
-        "allocations": allocations,
+        "allocations": _redistribute_land_preparation_allocation(allocations, effective_budget),
     }
+
+
+def _redistribute_land_preparation_allocation(allocations: List[Dict[str, Any]], budget_total: float) -> List[Dict[str, Any]]:
+    if not allocations:
+        return allocations
+
+    visible_allocations = []
+    hidden_land_preparation = None
+
+    for item in allocations:
+        if item.get("category") == "Land Preparation":
+            hidden_land_preparation = item
+            continue
+        if item.get("category") in VISIBLE_ALLOCATION_CATEGORIES:
+            visible_allocations.append(
+                {
+                    **item,
+                    "historical_cost": float(item.get("historical_cost", 0.0) or 0.0),
+                    "percent_of_total": float(item.get("percent_of_total", 0.0) or 0.0),
+                    "allocated_amount": float(item.get("allocated_amount", 0.0) or 0.0),
+                }
+            )
+
+    if not visible_allocations:
+        visible_allocations = [
+            {
+                "category": category,
+                "historical_cost": 0.0,
+                "percent_of_total": 0.0,
+                "allocated_amount": 0.0,
+            }
+            for category in VISIBLE_ALLOCATION_CATEGORIES
+        ]
+
+    land_percent = float((hidden_land_preparation or {}).get("percent_of_total", 0.0) or 0.0)
+    land_amount = float((hidden_land_preparation or {}).get("allocated_amount", 0.0) or 0.0)
+    land_cost = float((hidden_land_preparation or {}).get("historical_cost", 0.0) or 0.0)
+
+    visible_percent_total = sum(item["percent_of_total"] for item in visible_allocations)
+    if visible_percent_total <= 0:
+        fallback_total = sum(DEFAULT_ALLOCATION_PERCENTAGES[category] for category in VISIBLE_ALLOCATION_CATEGORIES)
+        for item in visible_allocations:
+            base_percent = DEFAULT_ALLOCATION_PERCENTAGES[item["category"]]
+            share = base_percent / fallback_total if fallback_total > 0 else 1 / len(visible_allocations)
+            item["percent_of_total"] = round(share * 100.0, 2)
+            item["allocated_amount"] = round(budget_total * share, 2)
+        visible_percent_total = sum(item["percent_of_total"] for item in visible_allocations)
+
+    if land_percent > 0 or land_amount > 0 or land_cost > 0:
+        for item in visible_allocations:
+            share = (item["percent_of_total"] / visible_percent_total) if visible_percent_total > 0 else (1 / len(visible_allocations))
+            item["percent_of_total"] = round(item["percent_of_total"] + (land_percent * share), 2)
+            item["allocated_amount"] = round(item["allocated_amount"] + (land_amount * share), 2)
+            item["historical_cost"] = round(item["historical_cost"] + (land_cost * share), 2)
+
+    running_amount = round(sum(item["allocated_amount"] for item in visible_allocations), 2)
+    drift = round(budget_total - running_amount, 2)
+    if visible_allocations and budget_total > 0:
+        visible_allocations[-1]["allocated_amount"] = round(visible_allocations[-1]["allocated_amount"] + drift, 2)
+
+    running_percent = round(sum(item["percent_of_total"] for item in visible_allocations), 2)
+    percent_drift = round(100.0 - running_percent, 2)
+    if visible_allocations:
+        visible_allocations[-1]["percent_of_total"] = round(visible_allocations[-1]["percent_of_total"] + percent_drift, 2)
+
+    return visible_allocations
 
 
 def _ensure_project_budget_total(project: CropProject) -> None:
