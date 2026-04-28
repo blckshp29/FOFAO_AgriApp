@@ -35,6 +35,15 @@ DEFAULT_HISTORICAL_CATEGORIES = [
     "Miscellaneous",
 ]
 
+DEFAULT_ALLOCATION_PERCENTAGES = {
+    "Land Preparation": 18.0,
+    "Seeds": 8.0,
+    "Fertilizers": 28.0,
+    "Chemicals": 18.0,
+    "Labor": 22.0,
+    "Miscellaneous": 6.0,
+}
+
 RICE_BASE_COST_COMPONENTS = [
     ("Land Preparation", 11000.0, 14000.0),
     ("Seeds", 2500.0, 3500.0),
@@ -658,17 +667,23 @@ def _build_budget_allocation_payload(summary: Dict[str, Any], budget_total: floa
     effective_budget = round(budget_total or summary.get("total_historical_spend", 0.0) or 0.0, 2)
     allocations = summary.get("allocations", []) or []
 
-    if not allocations and effective_budget > 0:
-        equal_percent = round(100.0 / len(DEFAULT_HISTORICAL_CATEGORIES), 2)
+    has_meaningful_history = any((item.get("percent_of_total", 0) or 0) > 0 for item in allocations)
+
+    if (not allocations or not has_meaningful_history) and effective_budget > 0:
         allocations = [
             {
                 "category": category,
                 "historical_cost": 0.0,
-                "percent_of_total": equal_percent,
-                "allocated_amount": round(effective_budget / len(DEFAULT_HISTORICAL_CATEGORIES), 2),
+                "percent_of_total": DEFAULT_ALLOCATION_PERCENTAGES[category],
+                "allocated_amount": round(effective_budget * (DEFAULT_ALLOCATION_PERCENTAGES[category] / 100.0), 2),
             }
             for category in DEFAULT_HISTORICAL_CATEGORIES
         ]
+
+        # Fix rounding drift on the final category so totals match exactly.
+        running_total = round(sum(item["allocated_amount"] for item in allocations), 2)
+        drift = round(effective_budget - running_total, 2)
+        allocations[-1]["allocated_amount"] = round(allocations[-1]["allocated_amount"] + drift, 2)
 
     budget_min = round(effective_budget * 0.9, 2) if effective_budget > 0 else 0.0
     budget_max = round(effective_budget * 1.1, 2) if effective_budget > 0 else 0.0
@@ -678,8 +693,8 @@ def _build_budget_allocation_payload(summary: Dict[str, Any], budget_total: floa
         "budget_recommended": effective_budget,
         "budget_min": budget_min,
         "budget_max": budget_max,
-        "used_history_records": summary.get("used_history_records", False),
-        "history_source": summary.get("history_source"),
+        "used_history_records": summary.get("used_history_records", False) and has_meaningful_history,
+        "history_source": summary.get("history_source") if has_meaningful_history else "default_recommended_split",
         "total_historical_spend": round(summary.get("total_historical_spend", 0.0), 2),
         "allocations": allocations,
     }
