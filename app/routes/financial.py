@@ -684,6 +684,14 @@ def _build_budget_allocation_payload(summary: Dict[str, Any], budget_total: floa
         "allocations": allocations,
     }
 
+
+def _ensure_project_budget_total(project: CropProject) -> None:
+    if (project.budget_total or 0) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Project budget_total must be greater than 0 before budget allocation can be computed."
+        )
+
 @router.post("/financial/records", response_model=FinancialRecordSchema)
 def create_financial_record(
     record: FinancialRecordCreate,
@@ -792,7 +800,20 @@ def get_historical_budget_allocation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    if budget_total is None and project_id is not None:
+        project = db.query(CropProject).filter(
+            CropProject.id == project_id,
+            CropProject.owner_id == current_user.id
+        ).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        _ensure_project_budget_total(project)
     effective_budget = _resolve_budget(project_id, budget_total, db, current_user.id)
+    if effective_budget <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="budget must be greater than 0, or provide a project with a valid budget_total."
+        )
     summary = _calculate_historical_allocations(db, current_user.id, effective_budget)
     return _build_budget_allocation_payload(summary, effective_budget)
 
@@ -1334,7 +1355,9 @@ def create_project(
     if existing_recent:
         return existing_recent
 
-    budget_total = data.get("budget_total") or 0
+    budget_total = data.get("budget_total")
+    if budget_total is None or budget_total <= 0:
+        raise HTTPException(status_code=400, detail="budget_total must be greater than 0")
     db_project = CropProject(
         **data,
         owner_id=current_user.id,
@@ -1426,6 +1449,12 @@ def update_project(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     updates = payload.model_dump(exclude_unset=True)
+    new_budget_total = updates.get("budget_total")
+    if new_budget_total is not None and new_budget_total <= 0:
+        raise HTTPException(status_code=400, detail="budget_total must be greater than 0")
+    new_budget_remaining = updates.get("budget_remaining")
+    if new_budget_remaining is not None and new_budget_remaining < 0:
+        raise HTTPException(status_code=400, detail="budget_remaining must be greater than or equal to 0")
     new_status = updates.get("status")
     if new_status == ProjectStatus.COMPLETED:
         updates["completed_at"] = project.completed_at or datetime.utcnow()
@@ -1433,6 +1462,10 @@ def update_project(
             updates["end_date"] = updates["completed_at"]
     elif new_status and new_status != ProjectStatus.COMPLETED:
         updates["completed_at"] = None
+
+    if new_budget_total is not None and "budget_remaining" not in updates:
+        current_expenses = project.expense_total or 0
+        updates["budget_remaining"] = round(new_budget_total - current_expenses, 2)
 
     query.update(updates, synchronize_session=False)
     db.commit()

@@ -3,6 +3,9 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from config import config
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 1. Define the Base here. 
 # Your models.py should import this Base from here.
@@ -65,6 +68,7 @@ def init_db():
         FCMDeviceToken,
     )
     from .database import engine, Base
+    from .financial.init import repair_zero_budget_projects
     
     # 2. This command only creates tables that DON'T exist yet
     print("Creating database tables...")
@@ -78,6 +82,10 @@ def init_db():
     _ensure_weather_data_columns()
     _ensure_notification_data_column()
     _ensure_crop_project_completion_columns()
+    with SessionLocal() as db:
+        repaired_count = repair_zero_budget_projects(db)
+        if repaired_count:
+            logger.info("Repaired %s crop project records with zero budget_total.", repaired_count)
     print("Done!")
 
     # Verification check

@@ -596,7 +596,7 @@ class CropProjectBase(BaseModel):
     name: str
     crop_type: CropTypeEnum
     crop_variety: Optional[str] = None
-    budget_total: float = 0
+    budget_total: float
     currency: str = "PHP"
     client_id: Optional[str] = None
     start_date: Optional[datetime] = None
@@ -604,6 +604,13 @@ class CropProjectBase(BaseModel):
     notes: Optional[str] = None
     farm_id: Optional[int] = None
     field_id: Optional[int] = None
+
+    @field_validator("budget_total")
+    @classmethod
+    def validate_budget_total(cls, value):
+        if value is None or value <= 0:
+            raise ValueError("budget_total must be greater than 0")
+        return value
 
 class CropProjectCreate(CropProjectBase):
     pass
@@ -623,6 +630,20 @@ class CropProjectUpdate(BaseModel):
     notes: Optional[str] = None
     farm_id: Optional[int] = None
     field_id: Optional[int] = None
+
+    @field_validator("budget_total")
+    @classmethod
+    def validate_updated_budget_total(cls, value):
+        if value is not None and value <= 0:
+            raise ValueError("budget_total must be greater than 0")
+        return value
+
+    @field_validator("budget_remaining")
+    @classmethod
+    def validate_budget_remaining(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("budget_remaining must be greater than or equal to 0")
+        return value
 
 class CropProject(CropProjectBase):
     id: int
