@@ -1444,9 +1444,12 @@ def create_project(
     if existing_recent:
         return existing_recent
 
-    budget_total = data.get("budget_total")
-    if budget_total is None or budget_total <= 0:
-        raise HTTPException(status_code=400, detail="budget_total must be greater than 0")
+    budget_total = data.get("budget_total") or 0
+    crop_type = data.get("crop_type")
+    if crop_type != models.CropType.COCONUT and budget_total <= 0:
+        raise HTTPException(status_code=400, detail="budget_total must be greater than 0 for non-coconut projects")
+    if crop_type == models.CropType.COCONUT and budget_total < 0:
+        raise HTTPException(status_code=400, detail="budget_total must be greater than or equal to 0")
     db_project = CropProject(
         **data,
         owner_id=current_user.id,
@@ -1538,9 +1541,12 @@ def update_project(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     updates = payload.model_dump(exclude_unset=True)
+    effective_crop_type = updates.get("crop_type", project.crop_type)
     new_budget_total = updates.get("budget_total")
-    if new_budget_total is not None and new_budget_total <= 0:
-        raise HTTPException(status_code=400, detail="budget_total must be greater than 0")
+    if effective_crop_type != models.CropType.COCONUT and new_budget_total is not None and new_budget_total <= 0:
+        raise HTTPException(status_code=400, detail="budget_total must be greater than 0 for non-coconut projects")
+    if effective_crop_type == models.CropType.COCONUT and new_budget_total is not None and new_budget_total < 0:
+        raise HTTPException(status_code=400, detail="budget_total must be greater than or equal to 0")
     new_budget_remaining = updates.get("budget_remaining")
     if new_budget_remaining is not None and new_budget_remaining < 0:
         raise HTTPException(status_code=400, detail="budget_remaining must be greater than or equal to 0")

@@ -34,6 +34,12 @@ def repair_zero_budget_projects(db: Session) -> int:
 
     repaired = 0
     for project in projects:
+        if project.crop_type == CropType.COCONUT:
+            # Coconut uses gross-revenue salary allocation, not budget-based allocation.
+            project.budget_total = round(project.budget_total or 0.0, 2)
+            project.budget_remaining = round(project.budget_remaining or 0.0, 2)
+            continue
+
         expenses = db.query(FinancialRecord).filter(
             FinancialRecord.owner_id == project.owner_id,
             FinancialRecord.project_id == project.id,

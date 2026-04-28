@@ -1,5 +1,5 @@
 import json
-from pydantic import AliasChoices, BaseModel, Field as PyField, ConfigDict # Rename Field here
+from pydantic import AliasChoices, BaseModel, Field as PyField, ConfigDict, model_validator # Rename Field here
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime, date
 from pydantic import field_validator
@@ -596,7 +596,7 @@ class CropProjectBase(BaseModel):
     name: str
     crop_type: CropTypeEnum
     crop_variety: Optional[str] = None
-    budget_total: float
+    budget_total: float = 0
     currency: str = "PHP"
     client_id: Optional[str] = None
     start_date: Optional[datetime] = None
@@ -605,12 +605,13 @@ class CropProjectBase(BaseModel):
     farm_id: Optional[int] = None
     field_id: Optional[int] = None
 
-    @field_validator("budget_total")
-    @classmethod
-    def validate_budget_total(cls, value):
-        if value is None or value <= 0:
-            raise ValueError("budget_total must be greater than 0")
-        return value
+    @model_validator(mode="after")
+    def validate_budget_total_for_crop(self):
+        if self.crop_type != CropTypeEnum.coconut and (self.budget_total is None or self.budget_total <= 0):
+            raise ValueError("budget_total must be greater than 0 for non-coconut projects")
+        if self.crop_type == CropTypeEnum.coconut and self.budget_total is not None and self.budget_total < 0:
+            raise ValueError("budget_total must be greater than or equal to 0")
+        return self
 
 class CropProjectCreate(CropProjectBase):
     pass
@@ -634,8 +635,8 @@ class CropProjectUpdate(BaseModel):
     @field_validator("budget_total")
     @classmethod
     def validate_updated_budget_total(cls, value):
-        if value is not None and value <= 0:
-            raise ValueError("budget_total must be greater than 0")
+        if value is not None and value < 0:
+            raise ValueError("budget_total must be greater than or equal to 0")
         return value
 
     @field_validator("budget_remaining")
