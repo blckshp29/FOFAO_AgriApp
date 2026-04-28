@@ -654,6 +654,13 @@ class CropProject(CropProjectBase):
     expense_total: float = 0
     status: ProjectStatusEnum = ProjectStatusEnum.planned
     completed_at: Optional[datetime] = None
+    all_tasks_completed: bool = False
+    income_recorded: bool = False
+    salary_distribution_generated: bool = False
+    completion_ready: bool = False
+    completion_status_label: str = "Ongoing"
+    completion_blockers: List[str] = PyField(default_factory=list)
+    budget_validation: Optional["ProjectBudgetValidation"] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     last_synced_at: Optional[datetime] = None
@@ -663,6 +670,7 @@ class CropProject(CropProjectBase):
 
 
 class ProjectCompletionResponse(BaseModel):
+    success: bool
     id: int
     field_id: Optional[int] = None
     crop_type: CropTypeEnum
@@ -670,6 +678,12 @@ class ProjectCompletionResponse(BaseModel):
     status: ProjectStatusEnum
     completed_at: Optional[datetime] = None
     message: str
+    all_tasks_completed: bool = False
+    income_recorded: bool = False
+    salary_distribution_generated: bool = False
+    completion_ready: bool = False
+    completion_status_label: str = "Ongoing"
+    completion_blockers: List[str] = PyField(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -744,6 +758,9 @@ class FinancialRecord(FinancialRecordBase):
     id: int
     owner_id: int
     date: datetime
+    warning_level: Literal["safe", "caution", "exceeded"] = "safe"
+    over_budget_amount: float = 0
+    budget_validation: Optional["CategoryBudgetValidation"] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     last_synced_at: Optional[datetime] = None
@@ -939,6 +956,23 @@ class InsightComparison(BaseModel):
     previous_netprofit_percent: float
     current_netprofit_percent: float
 
+class CategoryBudgetValidation(BaseModel):
+    category: str
+    allocated_budget: float
+    total_spent: float
+    remaining_budget: float
+    percent_used: float
+    is_over_budget: bool
+    over_budget_amount: float
+    warning_level: Literal["safe", "caution", "exceeded"]
+    warning_message: Optional[str] = None
+
+class ProjectBudgetValidation(BaseModel):
+    project_id: int
+    overall_warning_level: Literal["safe", "caution", "exceeded"]
+    alert_banner_message: Optional[str] = None
+    categories: List[CategoryBudgetValidation] = PyField(default_factory=list)
+
 class BudgetAllocationItem(BaseModel):
     category: str
     min_amount: float
@@ -962,6 +996,7 @@ class CornBudgetTemplateResponse(BaseModel):
     crop_type: str
     corn_type: str
     hectares: float
+    budget_per_hectare: float
     currency: str
     budget_min: float
     budget_max: float
@@ -1022,6 +1057,7 @@ class VegetableBudgetTemplateResponse(BaseModel):
     crop_type: str
     vegetable_type: str
     hectares: float
+    budget_per_hectare: float
     currency: str
     budget_min: float
     budget_max: float
@@ -1032,6 +1068,7 @@ class RiceBudgetTemplateResponse(BaseModel):
     crop_type: str
     crop_variety: str
     hectares: float
+    budget_per_hectare: float
     currency: str
     budget_min: float
     budget_max: float
@@ -1077,3 +1114,7 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     username: Optional[str] = None
+
+
+CropProject.model_rebuild()
+FinancialRecord.model_rebuild()
